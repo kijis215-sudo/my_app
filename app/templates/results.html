@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>提案結果</title>
+</head>
+<body>
+  <h1>サイクリング候補</h1>
+  <p>
+    距離：{{ distance }} km /
+    道タイプ：{{ "平坦" if road_type=="flat" else "坂" }}
+    {% if location %}/ エリア：{{ location }}{% endif %}
+  </p>
+
+  <ol>
+    {% for c in candidates %}
+      <li style="margin-bottom: 10px;">
+        <div><strong>{{ c.title }}</strong></div>
+        <div>
+          <a href="{{ c.maps_url }}" target="_blank" rel="noopener">
+            Google マップで開く
+          </a>
+        </div>
+      </li>
+    {% endfor %}
+  </ol>
+
+  <p><a href="/">戻る</a></p>
+</body>
+</html>

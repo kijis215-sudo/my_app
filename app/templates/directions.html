@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>候補ルート</title>
+  <style>
+    #maps { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .route-map { width: 100%; height: 55vh; }
+    #panel { padding: 8px; }
+    .route-item { margin: 8px 0; padding: 8px; background-color: #f5f5f5; border-left: 4px solid #2196F3; }
+    #status { margin: 8px 0; color: #444; }
+    #debug { white-space: pre-wrap; background: #111; color: #ddd; padding: 8px; border-radius: 6px; font-size: 12px; }
+    details { margin-top: 10px; }
+  </style>
+  <script>
+    // Maps JS が「認証エラー」の場合に呼ばれる
+    window.gm_authFailure = function () {
+      const el = document.getElementById("status");
+      if (el) el.textContent = "認証エラー（APIキー/制限）";
+      const dbg = document.getElementById("debug");
+      if (dbg) dbg.textContent += "\n[gm_authFailure] APIキーが無効、またはHTTPリファラ制限が合っていません。\n";
+    };
+  </script>
+  <script src="https://maps.googleapis.com/maps/api/js?key={{ api_key }}&callback=initMap&libraries=geometry&language=ja&region=JP" async defer></script>
+</head>
+<body>
+  <h2>候補ルート（サイクリング）</h2>
+  <p>
+    出発地：{{ origin }} /
+    総距離：{{ distance }} /
+    道：{{ "坂（ヒルクライム）" if road_type == "hills" else "平坦" }}
+  </p>
+  <div id="status">準備中...</div>
+  <div style="margin: 8px 0;">
+    <button type="button" id="clear-hidden" style="display:none;">非表示リストをクリア</button>
+  </div>
+
+  <div id="maps"></div>
+  <div id="panel">
+    <details>
+      <summary>デバッグ情報（開いて確認）</summary>
+      <div id="debug"></div>
+    </details>
+    <p><a href="/">戻る</a></p>
+  </div>
+
+  <script>
+    function createRouteBlock(index) {
+      const maps = document.getElementById("maps");
+      const block = document.createElement("div");
+
+      const info = document.createElement("div");
+      info.className = "route-item";
+      info.textContent = `候補${index}: 作成中...`;
+
+      const mapDiv = document.createElement("div");
+      mapDiv.className = "route-map";
+      mapDiv.id = `route-map-${index}`;
+
+      block.appendChild(info);
+      block.appendChild(mapDiv);
+      maps.appendChild(block);
+
+      return { block, infoEl: info, mapDiv };
+    }
+
+    function fitRouteBounds(map, route) {
+      try {
+        const path = route.overview_path || [];
+        if (!path.length) return;
+        const bounds = new google.maps.LatLngBounds();
+        for (const p of path) bounds.extend(p);
+        map.fitBounds(bounds);
+      } catch {
+        // no-op
+      }
+    }
+
+    function setStatus(text) {
+      const el = document.getElementById("status");
+      if (el) el.textContent = text;
+    }
+
+    function appendDebug(text) {
+      const el = document.getElementById("debug");
+      if (!el) return;
+      el.textContent += `${text}\n`;
+    }
+
+    function hintForStatus(status) {
+      switch (status) {
+        case "REQUEST_DENIED":
+          return "REQUEST_DENIED: Google Cloud側で Maps JavaScript API / Directions API / Geocoding API の有効化、請求(Billing)、APIキー制限(HTTPリファラ: http://127.0.0.1:5000/* と http://localhost:5000/*) を確認してください。";
+        case "OVER_QUERY_LIMIT":
+          return "OVER_QUERY_LIMIT: クォータ超過の可能性があります。少し待つ/キーを変える/課金設定を確認してください。";
+        case "ZERO_RESULTS":
+          return "ZERO_RESULTS: 出発地の表記を具体的にする（市区町村まで入れる）か、距離を短くして試してください。";
+        case "INVALID_REQUEST":
+          return "INVALID_REQUEST: 入力が空、またはリクエストが不正です（フォーム値やJSエラーを確認）。";
+        case "NOT_FOUND":
+          return "NOT_FOUND: 地名/住所が見つかりません。別表記で試してください。";
+        default:
+          return status ? `${status}: 詳細はブラウザConsoleも確認してください。` : "不明なエラー";
+      }
+    }
+
+    function parseDistanceRangeKm(rangeText) {
+      // e.g. "20-30" -> {lo:20, hi:30}
+      const text = String(rangeText || "").trim();
+      const m = text.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
+      if (m) return { lo: parseFloat(m[1]), hi: parseFloat(m[2]) };
+
+      const mOpen = text.match(/^(\d+(?:\.\d+)?)\s*-\s*$/);
+      if (mOpen) {
+        const lo = parseFloat(mOpen[1]);
+        return { lo, hi: lo + 20 };
+      }
+
+      const mSingle = text.match(/^(\d+(?:\.\d+)?)\s*$/);
+      if (mSingle) {
+        const v = parseFloat(mSingle[1]);
+        return { lo: v, hi: v };
+      }
+
+      return { lo: 20, hi: 30 };
+    }
+
+    function targetKmFromRange(rangeText) {
+      const r = parseDistanceRangeKm(rangeText);
+      return (r.lo + r.hi) / 2;
+    }
+
+    function clamp(n, lo, hi) {
+      return Math.max(lo, Math.min(hi, n));
+    }
+
+    function routeDistanceMeters(result) {
+      try {
+        const route = result.routes[0];
+        let total = 0;
+        for (const leg of route.legs || []) total += (leg.distance?.value || 0);
+        return total;
+      } catch {
+        return 0;
+      }
+    }
+
+    function samplePathLatLng(route) {
+      // overview_path は LatLng配列。Elevationの負荷を下げるため間引く。
+      const path = route.overview_path || [];
+      if (path.length <= 80) return path;
+      const sampled = [];
+      const step = Math.ceil(path.length / 80);
+      for (let i = 0; i < path.length; i += step) sampled.push(path[i]);
+      return sampled;
+    }
+
+    function geocodeAddress(geocoder, address) {
+      return new Promise((resolve, reject) => {
+        geocoder.geocode({ address }, (results, status) => {
+          if (status === "OK" && results && results[0]) return resolve(results[0]);
+          const e = new Error(`Geocode failed (${status}) for: ${address}`);
+          e.gStatus = status;
+          reject(e);
+        });
+      });
+    }
+
+    function reverseGeocodeLatLng(geocoder, latLng) {
+      return new Promise((resolve, reject) => {
+        geocoder.geocode({ location: latLng }, (results, status) => {
+          if (status === "OK" && results && results[0]) return resolve(results[0]);
+          const e = new Error(`Reverse geocode failed (${status})`);
+          e.gStatus = status;
+          reject(e);
+        });
+      });
+    }
+
+    function routeDirections(directionsService, req) {
+      return new Promise((resolve, reject) => {
+        directionsService.route(req, (result, status) => {
+          if (status === "OK" && result && result.routes && result.routes.length) return resolve(result);
+          const e = new Error(`Directions failed (${status})`);
+          e.dStatus = status;
+          reject(e);
+        });
+      });
+    }
+
+    async function routeDirectionsWithFallback(directionsService, baseReq, modes) {
+      let lastError = null;
+      for (const mode of modes) {
+        try {
+          const req = { ...baseReq, travelMode: mode };
+          const res = await routeDirections(directionsService, req);
+          res.__usedTravelMode = mode;
+          return res;
+        } catch (e) {
+          lastError = e;
+          // ZERO_RESULTS/NOT_FOUND などは次モードで再試行
+          if (e && (e.dStatus === "ZERO_RESULTS" || e.dStatus === "NOT_FOUND" || e.dStatus === "UNKNOWN_ERROR")) {
+            continue;
+          }
+          // REQUEST_DENIED 等は再試行しても意味が薄いので即throw
+          throw e;
+        }
+      }
+      throw lastError || new Error("Directions failed");
+    }
+
+    function travelModesForRoadType(roadType) {
+      // NOTE: DRIVING tends to pick the fastest/flat route.
+      // For hills, try to stay on BICYCLING/WALKING as much as possible.
+      if (roadType === "hills") {
+        return [
+          google.maps.TravelMode.BICYCLING,
+          google.maps.TravelMode.WALKING,
+          google.maps.TravelMode.DRIVING,
+        ];
+      }
+      return [
+        google.maps.TravelMode.BICYCLING,
+        google.maps.TravelMode.DRIVING,
+        google.maps.TravelMode.WALKING,
+      ];
+    }
+
+    function getRouteElevationGain(elevationService, route) {
+      return new Promise((resolve) => {
+        const path = samplePathLatLng(route);
+        // Increase samples for better gain estimation (keep under quota/latency)
+        const samples = Math.min(80, path.length);
+        if (samples < 2) return resolve(null);
+        elevationService.getElevationAlongPath({ path, samples }, (elev, status) => {
+          if (status === "OK" && elev && elev.length > 1) {
+            return resolve(elevationGainMeters(elev));
+          }
+          resolve(null);
+        });
+      });
+    }
+
+    function elevationGainMeters(elevations) {
+      if (!elevations || elevations.length < 2) return 0;
+      let gain = 0;
+      for (let i = 1; i < elevations.length; i++) {
+        const d = (elevations[i].elevation || 0) - (elevations[i - 1].elevation || 0);
+        if (d > 0) gain += d;
+      }
+      return gain;
+    }
+
+    function routeToPoints(route) {
+      const path = route?.overview_path || [];
+      const points = [];
+      for (const p of path) {
+        try {
+          if (p && typeof p.toJSON === "function") {
+            const j = p.toJSON();
+            points.push({ lat: j.lat, lng: j.lng });
+          } else if (p && typeof p.lat === "function" && typeof p.lng === "function") {
+            points.push({ lat: p.lat(), lng: p.lng() });
+          }
+        } catch {
+          // skip
+        }
+      }
+      return points;
+    }
+
+    async function downloadGpx({ name, points }) {
+      const res = await fetch("/gpx", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, points }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `GPX生成に失敗しました (HTTP ${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${name || "route"}.gpx`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    const HIDDEN_ROUTES_STORAGE_KEY = "my_app.hidden_routes.v1";
+
+    function normalizeText(s) {
+      return String(s || "").trim().replace(/\s+/g, " ");
+    }
+
+    function contextKey(originQuery, distanceRange, roadType) {
+      return [normalizeText(originQuery), normalizeText(distanceRange), normalizeText(roadType)].join("|");
+    }
+
+    function loadHiddenRoutesMap() {
+      try {
+        const raw = localStorage.getItem(HIDDEN_ROUTES_STORAGE_KEY);
+        if (!raw) return {};
+        const obj = JSON.parse(raw);
+        return (obj && typeof obj === "object") ? obj : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function saveHiddenRoutesMap(mapObj) {
+      try {
+        localStorage.setItem(HIDDEN_ROUTES_STORAGE_KEY, JSON.stringify(mapObj || {}));
+      } catch {
+        // no-op
+      }
+    }
+
+    function getHiddenSetForContext(ctxKey) {
+      const mapObj = loadHiddenRoutesMap();
+      const arr = mapObj[ctxKey];
+      if (!Array.isArray(arr)) return new Set();
+      return new Set(arr.filter((x) => typeof x === "string" && x.length));
+    }
+
+    function addHiddenSignature(ctxKey, signature) {
+      const sig = String(signature || "");
+      if (!sig) return;
+      const mapObj = loadHiddenRoutesMap();
+      const arr = Array.isArray(mapObj[ctxKey]) ? mapObj[ctxKey] : [];
+      if (!arr.includes(sig)) arr.push(sig);
+      // Keep it bounded
+      mapObj[ctxKey] = arr.slice(-200);
+      saveHiddenRoutesMap(mapObj);
+    }
+
+    function clearHiddenForContext(ctxKey) {
+      const mapObj = loadHiddenRoutesMap();
+      if (mapObj && Object.prototype.hasOwnProperty.call(mapObj, ctxKey)) {
+        delete mapObj[ctxKey];
+        saveHiddenRoutesMap(mapObj);
+      }
+    }
+
+    function routeSignature(route) {
+      // Prefer encoded polyline for stable, compact signature.
+      const p = route?.overview_polyline?.points;
+      if (typeof p === "string" && p.length) return `poly:${p}`;
+
+      // Fallback to a coarse signature from sampled points.
+      const pts = routeToPoints(route);
+      if (!pts.length) return "";
+      const head = pts[0];
+      const tail = pts[pts.length - 1];
+      return `pts:${pts.length}:${head.lat.toFixed(5)},${head.lng.toFixed(5)}:${tail.lat.toFixed(5)},${tail.lng.toFixed(5)}`;
+    }
+
+    function initMap() {
+      const apiKey = {{ api_key|tojson }};
+      if (!apiKey) {
+        alert("Google Maps API key is not set. Please set MAP_JAVA_API_KEY in .env file.");
+        return;
+      }
+
+      const originQuery = {{ origin|tojson }};
+      const distanceRange = {{ distance|tojson }};
+      const roadType = {{ road_type|tojson }};
+
+      const ctxKey = contextKey(originQuery, distanceRange, roadType);
+      const hiddenSet = getHiddenSetForContext(ctxKey);
+
+      const clearBtn = document.getElementById("clear-hidden");
+      if (clearBtn) {
+        clearBtn.style.display = hiddenSet.size ? "inline-block" : "none";
+        clearBtn.addEventListener("click", () => {
+          if (!confirm("この条件で選択済み（次回非表示）のルートをすべてクリアしますか？")) return;
+          clearHiddenForContext(ctxKey);
+          location.reload();
+        });
+      }
+
+      appendDebug(`[input] origin=${originQuery}`);
+      appendDebug(`[input] distance=${distanceRange}`);
+      appendDebug(`[input] road_type=${roadType}`);
+      appendDebug(`[hidden] ctx=${ctxKey} hidden_count=${hiddenSet.size}`);
+
+      const rangeKm = parseDistanceRangeKm(distanceRange);
+      const minKm = rangeKm.lo;
+      const maxKm = rangeKm.hi;
+      const targetKm = (minKm + maxKm) / 2;
+      appendDebug(`[distance] total_km_range=${minKm}-${maxKm} target=${targetKm}`);
+      // 2 waypoint の周回（origin->wp1->wp2->origin）を作る。
+      // 単純化すると総距離はおおむね 3.7*r くらいになりやすいので r≈target/3.7 を初期値にする。
+      // （道路網次第でブレるので後段の radiusScales と距離ランキングで吸収）
+      let baseRadiusMeters = clamp((targetKm * 1000) / 3.7, 1500, 60000);
+      if (roadType === "hills") {
+        // Reach hillier areas more easily; will be corrected by distance-ranking.
+        baseRadiusMeters = clamp(baseRadiusMeters * 1.35, 3000, 80000);
+        baseRadiusMeters = Math.max(baseRadiusMeters, 7000);
+      }
+
+      const directionsService = new google.maps.DirectionsService();
+      const geocoder = new google.maps.Geocoder();
+      let renderedCount = 0;
+
+      const mapsContainer = document.getElementById("maps");
+      mapsContainer.innerHTML = "";
+
+      const elevationService = new google.maps.ElevationService();
+
+      (async () => {
+        try {
+          setStatus("出発地を検索中...");
+          const originResult = await geocodeAddress(geocoder, originQuery);
+          const originLoc = originResult.geometry.location;
+          appendDebug(`[geocode:OK] ${originResult.formatted_address || originQuery}`);
+
+          const originPlaceId = originResult.place_id;
+          if (originPlaceId) appendDebug(`[origin] place_id=${originPlaceId}`);
+
+          async function waypointLocationFromLatLng(latLng, label) {
+            try {
+              const wpRes = await reverseGeocodeLatLng(geocoder, latLng);
+              if (wpRes.place_id) {
+                appendDebug(`[waypoint] ${label} place_id=${wpRes.place_id} addr=${wpRes.formatted_address || ""}`);
+                return { placeId: wpRes.place_id };
+              }
+              appendDebug(`[waypoint] ${label} reverse_geocode_ok (no place_id)`);
+              return latLng;
+            } catch (e) {
+              appendDebug(`[waypoint] ${label} reverse_geocode_ng status=${e.gStatus || "?"}`);
+              return latLng;
+            }
+          }
+
+          // 方角を変えて複数作る
+          // 坂モードは“山側に当たる確率”を上げるため、試す方角と候補数を増やす
+          const bearings = (roadType === "hills")
+            ? [0, 45, 90, 135, 180, 225, 270, 315]
+            : [20, 140, 260];
+          const maxRoutes = (roadType === "hills") ? 5 : 3;
+          appendDebug(`[bearings] count=${bearings.length} max_routes=${maxRoutes} values=${bearings.join(",")}`);
+          // 範囲内が最優先。範囲外しかない場合に備えて少しだけスラックを持たせる。
+          const slackKm = Math.max(2, targetKm * 0.08);
+          const hardCapKm = Math.max(maxKm + 10, targetKm * 1.35); // これ以上は目的距離から外れすぎ
+
+          setStatus("ルートを作成中...");
+          const tasks = bearings.slice(0, maxRoutes).map(async (bearingDeg, idx) => {
+            const blockIndex = idx + 1;
+            const routeBlock = createRouteBlock(blockIndex);
+
+            let radius = baseRadiusMeters;
+            const maxIter = 7;
+            let bestPick = null; // { result, chosen, usedTravelMode, km, inRange }
+
+            for (let iter = 0; iter < maxIter; iter++) {
+              // 2 waypoint を120度ずらして配置（ループを作りやすくする）
+              const wp2Bearing = (roadType === "hills") ? (bearingDeg + 30) : (bearingDeg + 120);
+              const wp1Dist = (roadType === "hills") ? (radius * 1.15) : radius;
+              const wp2Dist = (roadType === "hills") ? (radius * 0.95) : radius;
+              const wp1LatLng = google.maps.geometry.spherical.computeOffset(originLoc, wp1Dist, bearingDeg);
+              const wp2LatLng = google.maps.geometry.spherical.computeOffset(originLoc, wp2Dist, wp2Bearing);
+              appendDebug(`[try] candidate=${idx + 1} iter=${iter + 1} bearing=${bearingDeg} radius_m=${Math.round(radius)}`);
+
+              const wp1 = await waypointLocationFromLatLng(wp1LatLng, `candidate=${idx + 1} wp1`);
+              const wp2 = await waypointLocationFromLatLng(wp2LatLng, `candidate=${idx + 1} wp2`);
+
+              const reqBase = {
+                origin: originPlaceId ? { placeId: originPlaceId } : originLoc,
+                destination: originPlaceId ? { placeId: originPlaceId } : originLoc,
+                waypoints: [
+                  { location: wp1, stopover: false },
+                  { location: wp2, stopover: false },
+                ],
+                provideRouteAlternatives: true,
+                avoidHighways: true,
+                avoidTolls: true,
+              };
+
+              let result;
+              try {
+                result = await routeDirectionsWithFallback(
+                  directionsService,
+                  reqBase,
+                  travelModesForRoadType(roadType)
+                );
+                appendDebug(`[directions:OK] candidate=${idx + 1} travelMode=${result.__usedTravelMode}`);
+
+                if (roadType === "hills" && result.__usedTravelMode === google.maps.TravelMode.DRIVING) {
+                  // DRIVING is often too flat; try exploring elsewhere before accepting.
+                  radius = clamp(radius * 1.18, 1500, 80000);
+                  appendDebug(`[adjust] candidate=${idx + 1} reason=driving_mode radius_m=${Math.round(radius)}`);
+                  continue;
+                }
+              } catch (e) {
+                appendDebug(`[directions:NG] candidate=${idx + 1} status=${e.dStatus || "?"} ${hintForStatus(e.dStatus)}`);
+                // この候補は諦める（他候補は続行）
+                throw e;
+              }
+
+              // 距離が近い上位2つだけElevationで評価
+              const measured = result.routes
+                .map((r, i) => ({ route: r, routeIndex: i, meters: routeDistanceMeters({ routes: [r] }) }))
+                .map((x) => ({ ...x, km: x.meters / 1000 }))
+                .sort((a, b) => Math.abs(a.km - targetKm) - Math.abs(b.km - targetKm));
+
+              const inRange = measured.filter((x) => x.km >= minKm && x.km <= maxKm);
+              const nearRange = measured.filter((x) => x.km >= (minKm - slackKm) && x.km <= (maxKm + slackKm));
+
+              const pool = (inRange.length ? inRange : (nearRange.length ? nearRange : measured)).slice(0, 5);
+              const filteredPool = pool.filter((x) => x.km <= hardCapKm);
+              if (filteredPool.length === 0) {
+                // 長すぎる場合は半径を縮めて再試行
+                radius = clamp(radius * 0.75, 1500, 60000);
+                appendDebug(`[adjust] candidate=${idx + 1} reason=too_long new_radius_m=${Math.round(radius)}`);
+                continue;
+              }
+
+              // Exclude routes the user already selected for this context
+              const notHidden = filteredPool.filter((c) => {
+                const sig = routeSignature(c.route);
+                return sig && !hiddenSet.has(sig);
+              });
+              if (notHidden.length === 0) {
+                // All candidates for this iteration are hidden; adjust radius to search elsewhere.
+                radius = clamp(radius * 1.12, 1500, 60000);
+                appendDebug(`[adjust] candidate=${idx + 1} reason=all_hidden new_radius_m=${Math.round(radius)}`);
+                continue;
+              }
+
+              // Evaluate more candidates with Elevation to bias hills/flat
+              const evalCount = (roadType === "hills") ? 5 : 3;
+              const distanceCandidates = notHidden.slice(0, evalCount);
+
+              const withElev = await Promise.all(
+                distanceCandidates.map(async (c) => {
+                  const gain = await getRouteElevationGain(elevationService, c.route);
+                  return { ...c, elevGain: gain };
+                })
+              );
+
+              let chosen = withElev[0];
+              const validElev = withElev.filter((c) => typeof c.elevGain === "number");
+              if (validElev.length) {
+                if (roadType === "hills") {
+                  chosen = validElev.reduce((a, b) => {
+                    if (a.elevGain === b.elevGain) {
+                      return (Math.abs(a.km - targetKm) <= Math.abs(b.km - targetKm)) ? a : b;
+                    }
+                    return (a.elevGain >= b.elevGain) ? a : b;
+                  });
+                } else {
+                  chosen = validElev.reduce((a, b) => {
+                    if (a.elevGain === b.elevGain) {
+                      return (Math.abs(a.km - targetKm) <= Math.abs(b.km - targetKm)) ? a : b;
+                    }
+                    return (a.elevGain <= b.elevGain) ? a : b;
+                  });
+                }
+              }
+
+              const chosenKm = chosen.meters / 1000;
+              const chosenInRange = chosenKm >= minKm && chosenKm <= maxKm;
+
+              if (!bestPick) {
+                bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
+              } else {
+                // レンジ内を最優先、同条件ならターゲットに近い方
+                if (chosenInRange && !bestPick.inRange) {
+                  bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
+                } else if (chosenInRange === bestPick.inRange) {
+                  const currDiff = Math.abs(bestPick.km - targetKm);
+                  const nextDiff = Math.abs(chosenKm - targetKm);
+                  if (nextDiff < currDiff) {
+                    bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
+                  }
+                }
+              }
+
+              if (chosenInRange) {
+                // For hills, keep searching a bit if the chosen route is too flat.
+                const gain = chosen.elevGain;
+                if (roadType === "hills" && typeof gain === "number") {
+                  const minGain = Math.max(40, targetKm * 4); // heuristic
+                  if (gain < minGain && iter < maxIter - 1) {
+                    radius = clamp(radius * 1.2, 1500, 60000);
+                    appendDebug(`[adjust] candidate=${idx + 1} reason=too_flat gain=${Math.round(gain)} minGain=${Math.round(minGain)} new_radius_m=${Math.round(radius)}`);
+                    continue;
+                  }
+                }
+                break;
+              }
+
+              // 半径を自動調整（長いなら縮める、短いなら伸ばす）
+              if (chosenKm > maxKm) {
+                radius = clamp(radius * 0.82, 1500, 60000);
+              } else if (chosenKm < minKm) {
+                radius = clamp(radius * 1.18, 1500, 60000);
+              } else {
+                // nearRange に入ったら終了
+                break;
+              }
+              appendDebug(`[adjust] candidate=${idx + 1} best_km=${chosenKm.toFixed(1)} new_radius_m=${Math.round(radius)}`);
+            }
+
+            if (!bestPick) {
+              throw new Error("距離レンジに近いルートが見つかりませんでした");
+            }
+
+            // レンジ外が大きすぎる場合は表示しない（巨大距離の誤提示防止）
+            if (!bestPick.inRange && bestPick.km > (maxKm + slackKm)) {
+              throw new Error(`距離レンジ内のルートが見つかりませんでした（最短でも ${bestPick.km.toFixed(1)}km）`);
+            }
+
+            const routeMap = new google.maps.Map(routeBlock.mapDiv, {
+              zoom: 13,
+              center: originLoc,
+            });
+
+            new google.maps.DirectionsRenderer({
+              map: routeMap,
+              directions: bestPick.result,
+              routeIndex: bestPick.chosen.routeIndex,
+              suppressMarkers: false,
+            });
+
+            fitRouteBounds(routeMap, bestPick.chosen.route);
+
+            const elevTxt = (bestPick.chosen.elevGain == null) ? "" : ` / 獲得標高(概算) ${Math.round(bestPick.chosen.elevGain)}m`;
+            const typeTxt = (roadType === "hills") ? "坂寄り" : "平坦寄り";
+            const inRangeTxt = bestPick.inRange ? "" : "（距離レンジ範囲外）";
+            const summaryText = `候補${blockIndex}（${typeTxt}）: 総距離 ${bestPick.km.toFixed(1)}km${inRangeTxt}${elevTxt} / travelMode=${bestPick.usedTravelMode}`;
+            routeBlock.infoEl.textContent = summaryText;
+
+            const gpxBtn = document.createElement("button");
+            gpxBtn.type = "button";
+            gpxBtn.style.marginLeft = "8px";
+            gpxBtn.textContent = "GPXダウンロード";
+            gpxBtn.addEventListener("click", async () => {
+              try {
+                const points = routeToPoints(bestPick.chosen.route);
+                const originPart = String(originQuery || "origin").trim() || "origin";
+                const kmPart = `${bestPick.km.toFixed(1)}km`;
+                const elevPart = (bestPick.chosen.elevGain == null) ? "" : `${Math.round(bestPick.chosen.elevGain)}m`;
+                const name = [originPart, `route-${blockIndex}`, kmPart, elevPart].filter(Boolean).join("-");
+                await downloadGpx({ name, points });
+              } catch (e) {
+                alert(e?.message || String(e));
+              }
+            });
+            routeBlock.infoEl.appendChild(gpxBtn);
+
+            const selectBtn = document.createElement("button");
+            selectBtn.type = "button";
+            selectBtn.style.marginLeft = "8px";
+            selectBtn.textContent = "このルートを選択（次回は表示しない）";
+            selectBtn.addEventListener("click", () => {
+              const sig = routeSignature(bestPick.chosen.route);
+              if (!sig) {
+                alert("このルートの識別に失敗しました（signatureなし）");
+                return;
+              }
+              addHiddenSignature(ctxKey, sig);
+              hiddenSet.add(sig);
+              selectBtn.disabled = true;
+              selectBtn.textContent = "選択済み（次回は非表示）";
+              routeBlock.infoEl.style.borderLeftColor = "#4CAF50";
+              appendDebug(`[select] ctx=${ctxKey} signature_len=${sig.length}`);
+            });
+            routeBlock.infoEl.appendChild(selectBtn);
+
+            renderedCount += 1;
+
+            appendDebug(`[render:OK] candidate=${idx + 1} km=${bestPick.km.toFixed(1)} elev_gain=${(bestPick.chosen.elevGain == null) ? "n/a" : Math.round(bestPick.chosen.elevGain)}`);
+            return;
+          });
+
+          const settled = await Promise.allSettled(tasks);
+          const rejected = settled.filter((x) => x.status === "rejected");
+          if (rejected.length) {
+            appendDebug(`\n[summary] failed_candidates=${rejected.length}`);
+            for (const r of rejected) {
+              const reason = r.reason;
+              if (reason && (reason.dStatus || reason.gStatus)) {
+                appendDebug(`[fail] ${reason.message}`);
+              } else {
+                appendDebug(`[fail] ${String(reason)}`);
+              }
+            }
+          }
+          if (renderedCount === 0) {
+            setStatus("完了（候補なし）");
+            if (hiddenSet.size > 0) {
+              appendDebug("[ui] 候補が0件です。以前に選択したルートが多い可能性があります。必要なら非表示リストをクリアしてください。");
+              // Provide a one-click clear via console hint (UIは増やしすぎない)
+              appendDebug(`[hint] localStorage key: ${HIDDEN_ROUTES_STORAGE_KEY}`);
+            } else {
+              appendDebug("[ui] 候補ルートを作れませんでした。下の『デバッグ情報』で Geocode/Directions のステータスを確認してください。");
+            }
+          } else {
+            setStatus("完了");
+          }
+        } catch (e) {
+          console.error(e);
+          setStatus("エラーが発生しました");
+          appendDebug(`[fatal] ${e.message || e}`);
+          if (e && e.gStatus) appendDebug(hintForStatus(e.gStatus));
+          if (e && e.dStatus) appendDebug(hintForStatus(e.dStatus));
+          appendDebug("[ui] ルート生成に失敗しました。下の『デバッグ情報』とブラウザConsoleを確認してください。");
+        }
+      })();
+    }
+  </script>
+</body>
+</html>

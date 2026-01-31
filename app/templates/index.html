@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}トップ{% endblock %}
+{% block content %}
+  <h1>サイクリング：複数ルート表示（Google Maps）</h1>
+
+  {% if error %}
+    <p style="color:red;">{{ error }}</p>
+  {% endif %}
+
+  <form method="post" action="/directions">
+    <fieldset>
+      <legend>出発地 （住所 or 地名）</legend>
+      <div>
+        <label>出発地：
+          <input name="origin" style="width:360px;" placeholder="例：立命館大学 びわこ・くさつキャンパス">
+        </label>
+      </div>
+      <div>
+        
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>走る総距離（周回の合計）</legend>
+      <label><input type="radio" name="distance" value="10-20"> 10–20 km</label>
+      <label><input type="radio" name="distance" value="20-30" checked> 20–30 km</label><br>
+      <label><input type="radio" name="distance" value="30-40"> 30–40 km</label><br>
+      <label><input type="radio" name="distance" value="40-50"> 40–50 km</label><br>
+      <label><input type="radio" name="distance" value="50-60"> 50–60 km</label><br>
+      <label><input type="radio" name="distance" value="60-70"> 60–70 km</label><br>
+      <label><input type="radio" name="distance" value="70-80"> 70–80 km</label><br>
+      <label><input type="radio" name="distance" value="90-100"> 90–100 km</label><br>
+      <label><input type="radio" name="distance" value="100-"> 100 km以上</label>
+
+    </fieldset>
+
+    <fieldset>
+      <legend>道のタイプ</legend>
+      <label><input type="radio" name="road_type" value="flat" checked> 平坦</label>
+      <label><input type="radio" name="road_type" value="hills"> 坂（ヒルクライム）</label>
+    </fieldset>
+
+    <button type="submit">複数ルートを表示</button>
+  </form>
+{% endblock %}
