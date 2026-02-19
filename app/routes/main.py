@@ -16,6 +16,7 @@ def directions():
     origin = request.form.get("origin", "").strip()
     distance = request.form.get("distance", "20-30")
     road_type = request.form.get("road_type", "flat")
+    avoid_national = request.form.get("avoid_national") == "1"
 
     if not origin:
         return render_template("index.html", error="出発地を入力してね")
@@ -26,6 +27,7 @@ def directions():
         origin=origin,
         distance=distance,
         road_type=road_type,
+        avoid_national=avoid_national,
     )
 @main_bp.post("/results")
 def results():

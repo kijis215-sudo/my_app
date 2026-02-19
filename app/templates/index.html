@@ -1,45 +1,90 @@
 {% extends "base.html" %}
 {% block title %}トップ{% endblock %}
 {% block content %}
-  <h1>サイクリング：複数ルート表示（Google Maps）</h1>
+  <main class="page">
+    <div class="container">
+      <header class="hero">
+        <div class="hero-banner glass">
+          <img
+            class="hero-banner-image"
+            src="{{ url_for('static', filename='img/bike.svg') }}"
+            data-preferred-src="{{ url_for('static', filename='img/bike.jpg') }}"
+            alt=""
+            aria-hidden="true"
+            decoding="async"
+            loading="eager"
+          />
+          <div class="hero-banner-content">
+            <h1 class="hero-title">unknown RIDE</h1>
+            <p class="hero-sub">出発地と距離を選ぶと、候補ルートを複数生成します。</p>
+          </div>
+        </div>
+      </header>
 
-  {% if error %}
-    <p style="color:red;">{{ error }}</p>
-  {% endif %}
+      <script>
+        // Prefer a user-provided PNG if available; fall back to SVG.
+        (function () {
+          const img = document.querySelector(".hero-banner-image");
+          if (!img) return;
 
-  <form method="post" action="/directions">
-    <fieldset>
-      <legend>出発地 （住所 or 地名）</legend>
-      <div>
-        <label>出発地：
-          <input name="origin" style="width:360px;" placeholder="例：立命館大学 びわこ・くさつキャンパス">
-        </label>
-      </div>
-      <div>
+          const preferred = img.getAttribute("data-preferred-src");
+          const fallback = img.getAttribute("src");
+          if (!preferred || !fallback) return;
+
+          const probe = new Image();
+          probe.onload = function () { img.src = preferred; };
+          probe.onerror = function () { img.src = fallback; };
+          probe.src = preferred;
+        })();
+      </script>
+
+      <section class="glass card">
+        {% if error %}
+          <p class="error">{{ error }}</p>
+        {% endif %}
+
+        <form method="post" action="/directions" class="grid">
+          <fieldset class="fieldset">
+            <legend class="legend">出発地</legend>
+            <div class="row">
+              <div class="field">
+                <div class="label">住所 / 地名</div>
+                <input class="input" name="origin" placeholder="例：立命館大学 びわこ・くさつキャンパス" autocomplete="street-address" />
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset class="fieldset">
+            <legend class="legend">走る総距離（周回の合計）</legend>
+            <div class="options" role="group" aria-label="distance">
+              <label class="opt"><input type="radio" name="distance" value="10-20"> 10–20 km</label>
+              <label class="opt"><input type="radio" name="distance" value="20-30" checked> 20–30 km</label>
+              <label class="opt"><input type="radio" name="distance" value="30-40"> 30–40 km</label>
+              <label class="opt"><input type="radio" name="distance" value="40-50"> 40–50 km</label>
+              <label class="opt"><input type="radio" name="distance" value="50-60"> 50–60 km</label>
+              <label class="opt"><input type="radio" name="distance" value="60-70"> 60–70 km</label>
+              <label class="opt"><input type="radio" name="distance" value="70-80"> 70–80 km</label>
+              <label class="opt"><input type="radio" name="distance" value="90-100"> 90–100 km</label>
+              <label class="opt"><input type="radio" name="distance" value="100-"> 100 km以上</label>
+            </div>
+          </fieldset>
+
+          <fieldset class="fieldset">
+            <legend class="legend">道のタイプ</legend>
+            <div class="options options-roadtype" role="group" aria-label="road_type">
+              <label class="opt"><input type="radio" name="road_type" value="flat" checked> 平坦</label>
+              <label class="opt"><input type="radio" name="road_type" value="hills"> 坂（ヒルクライム）</label>
+              <label class="opt opt-under-flat"><input type="checkbox" name="avoid_national" value="1"> 国道をなるべく避ける</label>
+            </div>
+          </fieldset>
+
+          <div class="actions">
+            <button type="submit" class="btn">複数ルートを表示</button>
+          </div>
+        </form>
+
         
-      </div>
-    </fieldset>
-
-    <fieldset>
-      <legend>走る総距離（周回の合計）</legend>
-      <label><input type="radio" name="distance" value="10-20"> 10–20 km</label>
-      <label><input type="radio" name="distance" value="20-30" checked> 20–30 km</label><br>
-      <label><input type="radio" name="distance" value="30-40"> 30–40 km</label><br>
-      <label><input type="radio" name="distance" value="40-50"> 40–50 km</label><br>
-      <label><input type="radio" name="distance" value="50-60"> 50–60 km</label><br>
-      <label><input type="radio" name="distance" value="60-70"> 60–70 km</label><br>
-      <label><input type="radio" name="distance" value="70-80"> 70–80 km</label><br>
-      <label><input type="radio" name="distance" value="90-100"> 90–100 km</label><br>
-      <label><input type="radio" name="distance" value="100-"> 100 km以上</label>
-
-    </fieldset>
-
-    <fieldset>
-      <legend>道のタイプ</legend>
-      <label><input type="radio" name="road_type" value="flat" checked> 平坦</label>
-      <label><input type="radio" name="road_type" value="hills"> 坂（ヒルクライム）</label>
-    </fieldset>
-
-    <button type="submit">複数ルートを表示</button>
-  </form>
+      </section>
+    </div>
+  </main>
 {% endblock %}

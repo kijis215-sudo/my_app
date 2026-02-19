@@ -1,17 +1,7 @@
-<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <title>候補ルート</title>
-  <style>
-    #maps { display: grid; grid-template-columns: 1fr; gap: 12px; }
-    .route-map { width: 100%; height: 55vh; }
-    #panel { padding: 8px; }
-    .route-item { margin: 8px 0; padding: 8px; background-color: #f5f5f5; border-left: 4px solid #2196F3; }
-    #status { margin: 8px 0; color: #444; }
-    #debug { white-space: pre-wrap; background: #111; color: #ddd; padding: 8px; border-radius: 6px; font-size: 12px; }
-    details { margin-top: 10px; }
-  </style>
+{% extends "base.html" %}
+{% block title %}候補ルート{% endblock %}
+
+{% block head %}
   <script>
     // Maps JS が「認証エラー」の場合に呼ばれる
     window.gm_authFailure = function () {
@@ -20,38 +10,75 @@
       const dbg = document.getElementById("debug");
       if (dbg) dbg.textContent += "\n[gm_authFailure] APIキーが無効、またはHTTPリファラ制限が合っていません。\n";
     };
+
+    // callback が先に走っても落ちないようにする（async読み込みの競合対策）
+    window.__gmInitRequested = false;
+    window.initMap = function () { window.__gmInitRequested = true; };
   </script>
   <script src="https://maps.googleapis.com/maps/api/js?key={{ api_key }}&callback=initMap&libraries=geometry&language=ja&region=JP" async defer></script>
-</head>
-<body>
-  <h2>候補ルート（サイクリング）</h2>
-  <p>
-    出発地：{{ origin }} /
-    総距離：{{ distance }} /
-    道：{{ "坂（ヒルクライム）" if road_type == "hills" else "平坦" }}
-  </p>
-  <div id="status">準備中...</div>
-  <div style="margin: 8px 0;">
-    <button type="button" id="clear-hidden" style="display:none;">非表示リストをクリア</button>
-  </div>
+{% endblock %}
 
-  <div id="maps"></div>
-  <div id="panel">
-    <details>
-      <summary>デバッグ情報（開いて確認）</summary>
-      <div id="debug"></div>
-    </details>
-    <p><a href="/">戻る</a></p>
-  </div>
+{% block content %}
+  <main class="page">
+    <div class="container">
+      <header class="route-header">
+        <h2 class="route-title">候補ルート（サイクリング）</h2>
+        <div class="meta">
+          <span class="chip">出発地：{{ origin }}</span>
+          <span class="chip">総距離：{{ distance }}</span>
+          <span class="chip">道：{{ "坂（ヒルクライム）" if road_type == "hills" else "平坦" }}</span>
+          <span class="chip">国道回避：{{ "ON" if (avoid_national|default(false)) else "OFF" }}</span>
+        </div>
+      </header>
+
+      <section class="glass card">
+        <div class="status-row">
+          <div id="status">準備中...</div>
+          <button type="button" id="clear-hidden" class="btn btn-secondary btn-small btn-glass" style="display:none;">非表示リストをクリア</button>
+        </div>
+
+        <div id="maps" class="maps-grid"></div>
+
+        <div id="panel">
+          <details>
+            <summary>デバッグ情報（開いて確認）</summary>
+            <div id="debug"></div>
+          </details>
+          <div class="actions" style="margin-top:12px;">
+            <a href="/" class="btn btn-secondary btn-glass btn-large">トップに戻る</a>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
 
   <script>
     function createRouteBlock(index) {
       const maps = document.getElementById("maps");
       const block = document.createElement("div");
+      block.className = "route-block glass";
 
       const info = document.createElement("div");
       info.className = "route-item";
-      info.textContent = `候補${index}: 作成中...`;
+
+      const summary = document.createElement("div");
+      summary.className = "route-summary";
+
+      const titleLine = document.createElement("div");
+      titleLine.className = "route-titleline";
+      titleLine.textContent = `候補${index}: 作成中...`;
+
+      const metrics = document.createElement("div");
+      metrics.className = "route-metrics";
+
+      summary.appendChild(titleLine);
+      summary.appendChild(metrics);
+
+      const actions = document.createElement("div");
+      actions.className = "route-actions";
+
+      info.appendChild(summary);
+      info.appendChild(actions);
 
       const mapDiv = document.createElement("div");
       mapDiv.className = "route-map";
@@ -61,7 +88,17 @@
       block.appendChild(mapDiv);
       maps.appendChild(block);
 
-      return { block, infoEl: info, mapDiv };
+      return { block, infoEl: info, summaryEl: summary, titleEl: titleLine, metricsEl: metrics, actionsEl: actions, mapDiv };
+    }
+
+    function setMetrics(routeBlock, items) {
+      routeBlock.metricsEl.innerHTML = "";
+      for (const it of items) {
+        const el = document.createElement("span");
+        el.className = `metric${it.weak ? " metric-weak" : ""}`;
+        el.textContent = it.text;
+        routeBlock.metricsEl.appendChild(el);
+      }
     }
 
     function fitRouteBounds(map, route) {
@@ -99,6 +136,21 @@
           return "INVALID_REQUEST: 入力が空、またはリクエストが不正です（フォーム値やJSエラーを確認）。";
         case "NOT_FOUND":
           return "NOT_FOUND: 地名/住所が見つかりません。別表記で試してください。";
+        default:
+          return status ? `${status}: 詳細はブラウザConsoleも確認してください。` : "不明なエラー";
+      }
+    }
+
+    function hintForElevationStatus(status) {
+      switch (status) {
+        case "REQUEST_DENIED":
+          return "REQUEST_DENIED: Google Cloud側で Elevation API の有効化、請求(Billing)、APIキー制限(HTTPリファラ) を確認してください。";
+        case "OVER_QUERY_LIMIT":
+          return "OVER_QUERY_LIMIT: 標高APIのクォータ超過/短時間に叩きすぎの可能性があります。少し待つと改善することがあります。";
+        case "INVALID_REQUEST":
+          return "INVALID_REQUEST: 標高リクエストが不正です（path/samples）。";
+        case "UNKNOWN_ERROR":
+          return "UNKNOWN_ERROR: 一時的な問題の可能性があります。少し待って再試行してください。";
         default:
           return status ? `${status}: 詳細はブラウザConsoleも確認してください。` : "不明なエラー";
       }
@@ -153,6 +205,60 @@
       const step = Math.ceil(path.length / 80);
       for (let i = 0; i < path.length; i += step) sampled.push(path[i]);
       return sampled;
+    }
+
+    function stripHtml(html) {
+      return String(html || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    function isNationalRoadText(text) {
+      const s = stripHtml(text);
+      if (!s) return false;
+      // JP: 国道◯号 / 英: Route ◯ / R◯ (heuristic)
+      if (/国道\s*\d+\s*号/.test(s)) return true;
+      if (/\bRoute\s*\d+\b/i.test(s)) return true;
+      if (/\bR\s*\d+\b/.test(s)) return true;
+      if (s.includes("国道")) return true;
+      return false;
+    }
+
+    function estimateNationalRoadMeters(route) {
+      try {
+        let meters = 0;
+
+        for (const leg of route?.legs || []) {
+          for (const step of leg.steps || []) {
+            const instr = step?.instructions || "";
+            // NOTE: route.summary may contain a major road name (e.g. 国道1号) even if
+            // only part of the route uses it; don't treat the whole route as national.
+            const isNat = isNationalRoadText(instr);
+            if (isNat) meters += (step?.distance?.value || 0);
+          }
+        }
+        return meters;
+      } catch {
+        return 0;
+      }
+    }
+
+    function preferLowerNational(a, b) {
+      // Returns a preferred candidate when the difference is meaningful, otherwise null.
+      const an = a?.nationalMeters || 0;
+      const bn = b?.nationalMeters || 0;
+      if (an === bn) return null;
+
+      const aMeters = a?.meters || 0;
+      const bMeters = b?.meters || 0;
+      const aShare = an / Math.max(1, aMeters);
+      const bShare = bn / Math.max(1, bMeters);
+
+      // Tolerances to avoid jitter from heuristic estimation.
+      const metersTol = 2000; // 2km
+      const shareTol = 0.03;  // 3%
+
+      if (Math.abs(an - bn) >= metersTol) return (an <= bn) ? a : b;
+      if (Math.abs(aShare - bShare) >= shareTol) return (aShare <= bShare) ? a : b;
+      return null;
     }
 
     function geocodeAddress(geocoder, address) {
@@ -226,18 +332,74 @@
       ];
     }
 
-    function getRouteElevationGain(elevationService, route) {
+    function minElevationGainForHills(targetKm) {
+      // Heuristic: require a meaningful climb so "hills" doesn't include flat routes.
+      // 8m/km with a reasonable floor.
+      return Math.max(180, targetKm * 8);
+    }
+
+    function maxElevationGainForFlat(targetKm) {
+      // User preference: keep "flat" routes under this elevation gain.
+      // (targetKm reserved for possible future scaling)
+      return 300;
+    }
+
+    function sleep(ms) {
+      return new Promise((r) => setTimeout(r, ms));
+    }
+
+    // Serialize Elevation requests to reduce OVER_QUERY_LIMIT.
+    const elevationQueue = { tail: Promise.resolve() };
+
+    async function enqueueElevation(task) {
+      const prev = elevationQueue.tail;
+      let release;
+      elevationQueue.tail = new Promise((r) => (release = r));
+      await prev;
+      try {
+        return await task();
+      } finally {
+        release();
+      }
+    }
+
+    function getElevationAlongPathOnce(elevationService, path, samples) {
       return new Promise((resolve) => {
-        const path = samplePathLatLng(route);
-        // Increase samples for better gain estimation (keep under quota/latency)
-        const samples = Math.min(80, path.length);
-        if (samples < 2) return resolve(null);
         elevationService.getElevationAlongPath({ path, samples }, (elev, status) => {
-          if (status === "OK" && elev && elev.length > 1) {
-            return resolve(elevationGainMeters(elev));
-          }
-          resolve(null);
+          resolve({ elev, status });
         });
+      });
+    }
+
+    async function getElevationAlongPathWithRetry(elevationService, path, samples) {
+      const maxAttempts = 5;
+      let delayMs = 250;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const { elev, status } = await getElevationAlongPathOnce(elevationService, path, samples);
+        if (status === "OK" && elev && elev.length > 1) {
+          return { elev, status, attempt };
+        }
+        if (status === "OVER_QUERY_LIMIT" || status === "UNKNOWN_ERROR") {
+          await sleep(delayMs);
+          delayMs = Math.min(4000, delayMs * 2);
+          continue;
+        }
+        return { elev: null, status, attempt };
+      }
+      return { elev: null, status: "OVER_QUERY_LIMIT", attempt: maxAttempts };
+    }
+
+    function getRouteElevationGain(elevationService, route) {
+      return enqueueElevation(async () => {
+        const path = samplePathLatLng(route);
+        // Keep well under the API limit (<= 512).
+        const samples = Math.min(80, path.length);
+        if (samples < 2) return { gain: null, status: "INVALID_REQUEST", samples, attempt: 0 };
+        const { elev, status, attempt } = await getElevationAlongPathWithRetry(elevationService, path, samples);
+        if (status === "OK" && elev && elev.length > 1) {
+          return { gain: elevationGainMeters(elev), status, samples, attempt };
+        }
+        return { gain: null, status, samples, attempt };
       });
     }
 
@@ -371,6 +533,7 @@
       const originQuery = {{ origin|tojson }};
       const distanceRange = {{ distance|tojson }};
       const roadType = {{ road_type|tojson }};
+      const avoidNational = {{ (avoid_national|default(false))|tojson }};
 
       const ctxKey = contextKey(originQuery, distanceRange, roadType);
       const hiddenSet = getHiddenSetForContext(ctxKey);
@@ -388,6 +551,7 @@
       appendDebug(`[input] origin=${originQuery}`);
       appendDebug(`[input] distance=${distanceRange}`);
       appendDebug(`[input] road_type=${roadType}`);
+      appendDebug(`[input] avoid_national=${avoidNational}`);
       appendDebug(`[hidden] ctx=${ctxKey} hidden_count=${hiddenSet.size}`);
 
       const rangeKm = parseDistanceRangeKm(distanceRange);
@@ -440,36 +604,43 @@
           }
 
           // 方角を変えて複数作る
-          // 坂モードは“山側に当たる確率”を上げるため、試す方角と候補数を増やす
+          // 生成に失敗する方角もあるので「表示したい本数」より多めに試す
           const bearings = (roadType === "hills")
-            ? [0, 45, 90, 135, 180, 225, 270, 315]
-            : [20, 140, 260];
-          const maxRoutes = (roadType === "hills") ? 5 : 3;
-          appendDebug(`[bearings] count=${bearings.length} max_routes=${maxRoutes} values=${bearings.join(",")}`);
+            ? [
+                0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165,
+                180, 195, 210, 225, 240, 255, 270, 285, 300, 315, 330, 345,
+              ]
+            : [
+                20, 50, 80, 110, 140, 170, 200, 230, 260, 290, 320, 350,
+              ];
+          const maxRoutes = 4;
+          appendDebug(`[bearings] try=${bearings.length} want=${maxRoutes} values=${bearings.join(",")}`);
           // 範囲内が最優先。範囲外しかない場合に備えて少しだけスラックを持たせる。
           const slackKm = Math.max(2, targetKm * 0.08);
           const hardCapKm = Math.max(maxKm + 10, targetKm * 1.35); // これ以上は目的距離から外れすぎ
 
-          setStatus("ルートを作成中...");
-          const tasks = bearings.slice(0, maxRoutes).map(async (bearingDeg, idx) => {
-            const blockIndex = idx + 1;
+          setStatus(`ルートを作成中... (0/${maxRoutes})`);
+
+          const failures = [];
+
+          async function buildAndRenderRoute(bearingDeg, blockIndex, attemptIndex) {
             const routeBlock = createRouteBlock(blockIndex);
+            try {
+              let radius = baseRadiusMeters;
+              const maxIter = 7;
+              let bestPick = null; // { result, chosen, usedTravelMode, km, inRange }
 
-            let radius = baseRadiusMeters;
-            const maxIter = 7;
-            let bestPick = null; // { result, chosen, usedTravelMode, km, inRange }
-
-            for (let iter = 0; iter < maxIter; iter++) {
+              for (let iter = 0; iter < maxIter; iter++) {
               // 2 waypoint を120度ずらして配置（ループを作りやすくする）
               const wp2Bearing = (roadType === "hills") ? (bearingDeg + 30) : (bearingDeg + 120);
               const wp1Dist = (roadType === "hills") ? (radius * 1.15) : radius;
               const wp2Dist = (roadType === "hills") ? (radius * 0.95) : radius;
               const wp1LatLng = google.maps.geometry.spherical.computeOffset(originLoc, wp1Dist, bearingDeg);
               const wp2LatLng = google.maps.geometry.spherical.computeOffset(originLoc, wp2Dist, wp2Bearing);
-              appendDebug(`[try] candidate=${idx + 1} iter=${iter + 1} bearing=${bearingDeg} radius_m=${Math.round(radius)}`);
+              appendDebug(`[try] candidate=${attemptIndex} iter=${iter + 1} bearing=${bearingDeg} radius_m=${Math.round(radius)}`);
 
-              const wp1 = await waypointLocationFromLatLng(wp1LatLng, `candidate=${idx + 1} wp1`);
-              const wp2 = await waypointLocationFromLatLng(wp2LatLng, `candidate=${idx + 1} wp2`);
+              const wp1 = await waypointLocationFromLatLng(wp1LatLng, `candidate=${attemptIndex} wp1`);
+              const wp2 = await waypointLocationFromLatLng(wp2LatLng, `candidate=${attemptIndex} wp2`);
 
               const reqBase = {
                 origin: originPlaceId ? { placeId: originPlaceId } : originLoc,
@@ -490,16 +661,16 @@
                   reqBase,
                   travelModesForRoadType(roadType)
                 );
-                appendDebug(`[directions:OK] candidate=${idx + 1} travelMode=${result.__usedTravelMode}`);
+                appendDebug(`[directions:OK] candidate=${attemptIndex} travelMode=${result.__usedTravelMode}`);
 
                 if (roadType === "hills" && result.__usedTravelMode === google.maps.TravelMode.DRIVING) {
                   // DRIVING is often too flat; try exploring elsewhere before accepting.
                   radius = clamp(radius * 1.18, 1500, 80000);
-                  appendDebug(`[adjust] candidate=${idx + 1} reason=driving_mode radius_m=${Math.round(radius)}`);
+                  appendDebug(`[adjust] candidate=${attemptIndex} reason=driving_mode radius_m=${Math.round(radius)}`);
                   continue;
                 }
               } catch (e) {
-                appendDebug(`[directions:NG] candidate=${idx + 1} status=${e.dStatus || "?"} ${hintForStatus(e.dStatus)}`);
+                appendDebug(`[directions:NG] candidate=${attemptIndex} status=${e.dStatus || "?"} ${hintForStatus(e.dStatus)}`);
                 // この候補は諦める（他候補は続行）
                 throw e;
               }
@@ -518,7 +689,7 @@
               if (filteredPool.length === 0) {
                 // 長すぎる場合は半径を縮めて再試行
                 radius = clamp(radius * 0.75, 1500, 60000);
-                appendDebug(`[adjust] candidate=${idx + 1} reason=too_long new_radius_m=${Math.round(radius)}`);
+                appendDebug(`[adjust] candidate=${attemptIndex} reason=too_long new_radius_m=${Math.round(radius)}`);
                 continue;
               }
 
@@ -530,26 +701,38 @@
               if (notHidden.length === 0) {
                 // All candidates for this iteration are hidden; adjust radius to search elsewhere.
                 radius = clamp(radius * 1.12, 1500, 60000);
-                appendDebug(`[adjust] candidate=${idx + 1} reason=all_hidden new_radius_m=${Math.round(radius)}`);
+                appendDebug(`[adjust] candidate=${attemptIndex} reason=all_hidden new_radius_m=${Math.round(radius)}`);
                 continue;
               }
 
               // Evaluate more candidates with Elevation to bias hills/flat
               const evalCount = (roadType === "hills") ? 5 : 3;
-              const distanceCandidates = notHidden.slice(0, evalCount);
+              const distanceCandidates = notHidden
+                .slice(0, evalCount)
+                .map((c) => ({ ...c, nationalMeters: estimateNationalRoadMeters(c.route) }));
 
-              const withElev = await Promise.all(
-                distanceCandidates.map(async (c) => {
-                  const gain = await getRouteElevationGain(elevationService, c.route);
-                  return { ...c, elevGain: gain };
-                })
-              );
+              // 距離がレンジから遠い間は標高評価をスキップして、Elevationリクエスト数を抑える
+              const shouldEvalElevation = roadType !== "hills" || inRange.length > 0 || nearRange.length > 0;
+              let withElev;
+              if (!shouldEvalElevation) {
+                withElev = distanceCandidates.map((c) => ({ ...c, elevGain: null, elevStatus: "SKIPPED_DISTANCE", elevSamples: 0, elevAttempt: 0 }));
+              } else {
+                withElev = [];
+                for (const c of distanceCandidates) {
+                  const r = await getRouteElevationGain(elevationService, c.route);
+                  withElev.push({ ...c, elevGain: r.gain, elevStatus: r.status, elevSamples: r.samples, elevAttempt: r.attempt });
+                }
+              }
 
               let chosen = withElev[0];
               const validElev = withElev.filter((c) => typeof c.elevGain === "number");
               if (validElev.length) {
                 if (roadType === "hills") {
                   chosen = validElev.reduce((a, b) => {
+                    if (avoidNational) {
+                      const natPick = preferLowerNational(a, b);
+                      if (natPick) return natPick;
+                    }
                     if (a.elevGain === b.elevGain) {
                       return (Math.abs(a.km - targetKm) <= Math.abs(b.km - targetKm)) ? a : b;
                     }
@@ -557,12 +740,23 @@
                   });
                 } else {
                   chosen = validElev.reduce((a, b) => {
+                    if (avoidNational) {
+                      const natPick = preferLowerNational(a, b);
+                      if (natPick) return natPick;
+                    }
                     if (a.elevGain === b.elevGain) {
                       return (Math.abs(a.km - targetKm) <= Math.abs(b.km - targetKm)) ? a : b;
                     }
                     return (a.elevGain <= b.elevGain) ? a : b;
                   });
                 }
+              } else if (avoidNational) {
+                // Elevationが無い場合でも「国道少なめ」を優先しておく
+                chosen = withElev.reduce((a, b) => {
+                  const natPick = preferLowerNational(a, b);
+                  if (natPick) return natPick;
+                  return (Math.abs(a.km - targetKm) <= Math.abs(b.km - targetKm)) ? a : b;
+                });
               }
 
               const chosenKm = chosen.meters / 1000;
@@ -575,10 +769,23 @@
                 if (chosenInRange && !bestPick.inRange) {
                   bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
                 } else if (chosenInRange === bestPick.inRange) {
-                  const currDiff = Math.abs(bestPick.km - targetKm);
-                  const nextDiff = Math.abs(chosenKm - targetKm);
-                  if (nextDiff < currDiff) {
-                    bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
+                  if (avoidNational) {
+                    const natPick = preferLowerNational(bestPick.chosen, chosen);
+                    if (natPick === chosen) {
+                      bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
+                    } else if (natPick == null) {
+                      const currDiff = Math.abs(bestPick.km - targetKm);
+                      const nextDiff = Math.abs(chosenKm - targetKm);
+                      if (nextDiff < currDiff) {
+                        bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
+                      }
+                    }
+                  } else {
+                    const currDiff = Math.abs(bestPick.km - targetKm);
+                    const nextDiff = Math.abs(chosenKm - targetKm);
+                    if (nextDiff < currDiff) {
+                      bestPick = { result, chosen, usedTravelMode: result.__usedTravelMode, km: chosenKm, inRange: chosenInRange };
+                    }
                   }
                 }
               }
@@ -587,10 +794,28 @@
                 // For hills, keep searching a bit if the chosen route is too flat.
                 const gain = chosen.elevGain;
                 if (roadType === "hills" && typeof gain === "number") {
-                  const minGain = Math.max(40, targetKm * 4); // heuristic
-                  if (gain < minGain && iter < maxIter - 1) {
-                    radius = clamp(radius * 1.2, 1500, 60000);
-                    appendDebug(`[adjust] candidate=${idx + 1} reason=too_flat gain=${Math.round(gain)} minGain=${Math.round(minGain)} new_radius_m=${Math.round(radius)}`);
+                  const minGain = minElevationGainForHills(targetKm);
+                  if (gain < minGain) {
+                    radius = clamp(radius * 1.25, 1500, 80000);
+                    appendDebug(`[adjust] candidate=${attemptIndex} reason=too_flat gain=${Math.round(gain)} minGain=${Math.round(minGain)} new_radius_m=${Math.round(radius)}`);
+                    continue;
+                  }
+                } else if (roadType === "hills") {
+                  // If we can't measure elevation, don't accept it as a "hills" candidate.
+                  radius = clamp(radius * 1.2, 1500, 80000);
+                  appendDebug(`[adjust] candidate=${attemptIndex} reason=no_elevation status=${chosen.elevStatus || "?"} ${hintForElevationStatus(chosen.elevStatus)} new_radius_m=${Math.round(radius)}`);
+                  continue;
+                } else {
+                  // Flat mode: reject routes that are too hilly.
+                  const maxGain = maxElevationGainForFlat(targetKm);
+                  if (typeof gain !== "number") {
+                    radius = clamp(radius * 1.15, 1500, 80000);
+                    appendDebug(`[adjust] candidate=${attemptIndex} reason=no_elevation_flat status=${chosen.elevStatus || "?"} ${hintForElevationStatus(chosen.elevStatus)} new_radius_m=${Math.round(radius)}`);
+                    continue;
+                  }
+                  if (gain > maxGain) {
+                    radius = clamp(radius * 1.10, 1500, 80000);
+                    appendDebug(`[adjust] candidate=${attemptIndex} reason=too_hilly gain=${Math.round(gain)} maxGain=${Math.round(maxGain)} new_radius_m=${Math.round(radius)}`);
                     continue;
                   }
                 }
@@ -606,12 +831,34 @@
                 // nearRange に入ったら終了
                 break;
               }
-              appendDebug(`[adjust] candidate=${idx + 1} best_km=${chosenKm.toFixed(1)} new_radius_m=${Math.round(radius)}`);
+              appendDebug(`[adjust] candidate=${attemptIndex} best_km=${chosenKm.toFixed(1)} new_radius_m=${Math.round(radius)}`);
             }
 
-            if (!bestPick) {
-              throw new Error("距離レンジに近いルートが見つかりませんでした");
-            }
+              if (!bestPick) {
+                throw new Error("距離レンジに近いルートが見つかりませんでした");
+              }
+
+              if (roadType === "hills") {
+                const gain = bestPick.chosen.elevGain;
+                const minGain = minElevationGainForHills(targetKm);
+                if (typeof gain !== "number") {
+                  const st = bestPick.chosen.elevStatus || "?";
+                  throw new Error(`坂ルート判定に必要な標高取得に失敗しました: ${st} ${hintForElevationStatus(st)}`);
+                }
+                if (gain < minGain) {
+                  throw new Error(`坂ルート条件（獲得標高 ${Math.round(minGain)}m以上）を満たしませんでした: ${Math.round(gain)}m`);
+                }
+              } else {
+                const gain = bestPick.chosen.elevGain;
+                const maxGain = maxElevationGainForFlat(targetKm);
+                if (typeof gain !== "number") {
+                  const st = bestPick.chosen.elevStatus || "?";
+                  throw new Error(`平坦ルート判定に必要な標高取得に失敗しました: ${st} ${hintForElevationStatus(st)}`);
+                }
+                if (gain > maxGain) {
+                  throw new Error(`平坦ルート条件（獲得標高 ${Math.round(maxGain)}m以下）を満たしませんでした: ${Math.round(gain)}m`);
+                }
+              }
 
             // レンジ外が大きすぎる場合は表示しない（巨大距離の誤提示防止）
             if (!bestPick.inRange && bestPick.km > (maxKm + slackKm)) {
@@ -632,15 +879,23 @@
 
             fitRouteBounds(routeMap, bestPick.chosen.route);
 
-            const elevTxt = (bestPick.chosen.elevGain == null) ? "" : ` / 獲得標高(概算) ${Math.round(bestPick.chosen.elevGain)}m`;
             const typeTxt = (roadType === "hills") ? "坂寄り" : "平坦寄り";
-            const inRangeTxt = bestPick.inRange ? "" : "（距離レンジ範囲外）";
-            const summaryText = `候補${blockIndex}（${typeTxt}）: 総距離 ${bestPick.km.toFixed(1)}km${inRangeTxt}${elevTxt} / travelMode=${bestPick.usedTravelMode}`;
-            routeBlock.infoEl.textContent = summaryText;
+            routeBlock.titleEl.textContent = `候補${blockIndex}（${typeTxt}）`;
+
+            const metrics = [];
+            metrics.push({ text: `総距離 ${bestPick.km.toFixed(1)}km` });
+            if (!bestPick.inRange) metrics.push({ text: "距離レンジ外", weak: true });
+            if (bestPick.chosen.elevGain != null) metrics.push({ text: `獲得標高(概算) ${Math.round(bestPick.chosen.elevGain)}m` });
+            if (avoidNational && (bestPick.chosen.nationalMeters || 0) > 0) {
+              metrics.push({ text: `国道(推定) ${((bestPick.chosen.nationalMeters || 0) / 1000).toFixed(1)}km` });
+            }
+            setMetrics(routeBlock, metrics);
+
+            routeBlock.actionsEl.innerHTML = "";
 
             const gpxBtn = document.createElement("button");
             gpxBtn.type = "button";
-            gpxBtn.style.marginLeft = "8px";
+            gpxBtn.className = "btn btn-secondary btn-small btn-glass";
             gpxBtn.textContent = "GPXダウンロード";
             gpxBtn.addEventListener("click", async () => {
               try {
@@ -654,11 +909,11 @@
                 alert(e?.message || String(e));
               }
             });
-            routeBlock.infoEl.appendChild(gpxBtn);
+            routeBlock.actionsEl.appendChild(gpxBtn);
 
             const selectBtn = document.createElement("button");
             selectBtn.type = "button";
-            selectBtn.style.marginLeft = "8px";
+            selectBtn.className = "btn btn-secondary btn-small btn-glass";
             selectBtn.textContent = "このルートを選択（次回は表示しない）";
             selectBtn.addEventListener("click", () => {
               const sig = routeSignature(bestPick.chosen.route);
@@ -673,25 +928,45 @@
               routeBlock.infoEl.style.borderLeftColor = "#4CAF50";
               appendDebug(`[select] ctx=${ctxKey} signature_len=${sig.length}`);
             });
-            routeBlock.infoEl.appendChild(selectBtn);
+            routeBlock.actionsEl.appendChild(selectBtn);
 
             renderedCount += 1;
 
-            appendDebug(`[render:OK] candidate=${idx + 1} km=${bestPick.km.toFixed(1)} elev_gain=${(bestPick.chosen.elevGain == null) ? "n/a" : Math.round(bestPick.chosen.elevGain)}`);
-            return;
-          });
+            setStatus(`ルートを作成中... (${renderedCount}/${maxRoutes})`);
 
-          const settled = await Promise.allSettled(tasks);
-          const rejected = settled.filter((x) => x.status === "rejected");
-          if (rejected.length) {
-            appendDebug(`\n[summary] failed_candidates=${rejected.length}`);
-            for (const r of rejected) {
-              const reason = r.reason;
-              if (reason && (reason.dStatus || reason.gStatus)) {
-                appendDebug(`[fail] ${reason.message}`);
-              } else {
-                appendDebug(`[fail] ${String(reason)}`);
-              }
+              appendDebug(`[render:OK] candidate=${attemptIndex} km=${bestPick.km.toFixed(1)} elev_gain=${(bestPick.chosen.elevGain == null) ? "n/a" : Math.round(bestPick.chosen.elevGain)} elev_status=${bestPick.chosen.elevStatus || "n/a"}`);
+            } catch (e) {
+              try { routeBlock.block.remove(); } catch { /* no-op */ }
+              throw e;
+            }
+          }
+
+          for (let i = 0; i < bearings.length && renderedCount < maxRoutes; i++) {
+            const bearingDeg = bearings[i];
+            const blockIndex = renderedCount + 1;
+            const attemptIndex = i + 1;
+            try {
+              await buildAndRenderRoute(bearingDeg, blockIndex, attemptIndex);
+            } catch (e) {
+              failures.push(e);
+              appendDebug(`[fail] attempt=${attemptIndex} bearing=${bearingDeg} ${e?.message || String(e)}`);
+            }
+          }
+
+          if (failures.length) {
+            appendDebug(`\n[summary] failed_attempts=${failures.length}`);
+          }
+
+          if (renderedCount < maxRoutes) {
+            const lastMsg = failures.length ? (failures[failures.length - 1]?.message || String(failures[failures.length - 1])) : "";
+            for (let n = renderedCount + 1; n <= maxRoutes; n++) {
+              const rb = createRouteBlock(n);
+              rb.infoEl.style.borderLeftColor = "#999";
+              rb.titleEl.textContent = `候補${n}: 条件に合うルートが見つかりませんでした`;
+              setMetrics(rb, lastMsg ? [{ text: `例: ${lastMsg}`, weak: true }] : []);
+              rb.actionsEl.innerHTML = "";
+              rb.mapDiv.style.display = "none";
+              rb.mapDiv.style.height = "0";
             }
           }
           if (renderedCount === 0) {
@@ -703,6 +978,9 @@
             } else {
               appendDebug("[ui] 候補ルートを作れませんでした。下の『デバッグ情報』で Geocode/Directions のステータスを確認してください。");
             }
+          } else if (renderedCount < maxRoutes) {
+            setStatus(`完了（${renderedCount}/${maxRoutes}件）`);
+            appendDebug(`[ui] 目標件数に届きませんでした: ${renderedCount}/${maxRoutes}`);
           } else {
             setStatus("完了");
           }
@@ -716,6 +994,11 @@
         }
       })();
     }
+
+    // async読み込みで先に callback が走っていたら、ここで一度だけ実行する
+    if (window.__gmInitRequested) {
+      try { initMap(); } catch (e) { console.error(e); }
+      window.__gmInitRequested = false;
+    }
   </script>
-</body>
-</html>
+{% endblock %}
